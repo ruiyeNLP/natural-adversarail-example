@@ -146,6 +146,33 @@ class GecBERTModel(object):
 
         return start_pos - 1, end_pos - 1, sugg_token_clear, prob
 
+    def get_real_sugg_token(self, prob, sugg_token):
+        """Get lost of suggested actions for token."""
+        # cases when we don't need to do anything
+        real_sugg_token = ''
+        if prob < self.min_error_probability or sugg_token in [UNK, PAD, '$KEEP']:
+            return None
+        elif sugg_token.startswith('$DELETE'):
+            real_sugg_token = '$DELETE'
+        elif sugg_token.startswith('$APPEND_'):
+            real_sugg_token = '$APPEND'
+        elif sugg_token.startswith('$REPLACE_'):
+            real_sugg_token = '$REPLACE'   
+        elif sugg_token.startswith('$MERGE_'):
+            real_sugg_token = '$MERGE' 
+        elif sugg_token.startswith('$TRANSFORM_CASE_'):
+            real_sugg_token = '$TRANSFORM_CASE'
+        elif sugg_token.startswith('$TRANSFORM_SPLIT_'):
+            real_sugg_token = '$TRANSFORM_SPLIT'
+        elif sugg_token.startswith('$TRANSFORM_AGREEMENT_'):
+            real_sugg_token = '$TRANSFORM_AGREEMENT'
+        elif sugg_token.startswith('$TRANSFORM_VERB_'):
+            real_sugg_token = '$TRANSFORM_VERB'
+        else:
+            real_sugg_token = sugg_token
+    
+        return real_sugg_token
+
     def _get_embbeder(self, weigths_name, special_tokens_fix):
         embedders = {'bert': PretrainedBertEmbedder(
             pretrained_model=weigths_name,
@@ -222,12 +249,14 @@ class GecBERTModel(object):
     def postprocess_batch(self, batch, all_probabilities, all_idxs,
                           error_probs):
         all_results = []
+        all_sugg = []
         noop_index = self.vocab.get_token_index("$KEEP", "labels")
         for tokens, probabilities, idxs, error_prob in zip(batch,
                                                            all_probabilities,
                                                            all_idxs,
                                                            error_probs):
             length = min(len(tokens), self.max_len)
+            sugg = []
             edits = []
 
             # skip whole sentences if there no errors
@@ -256,16 +285,24 @@ class GecBERTModel(object):
                                                sugg_token)
                 if not action:
                     continue
-
                 edits.append(action)
+
+                real_sugg_token = self.get_real_sugg_token(probabilities[i], sugg_token)
+                if not real_sugg_token:
+                    continue
+                sugg.extend([str(real_sugg_token)])
+            
             all_results.append(get_target_sent_by_edits(tokens, edits))
-        return all_results
+            all_sugg.append(sugg)
+        # print(all_sugg)
+        return all_results, all_sugg
 
     def handle_batch(self, full_batch):
         """
         Handle batch of requests.
         """
         final_batch = full_batch[:]
+        corr_labels = []
         batch_size = len(full_batch)
         prev_preds_dict = {i: [final_batch[i]] for i in range(len(final_batch))}
         short_ids = [i for i in range(len(full_batch))
@@ -282,8 +319,10 @@ class GecBERTModel(object):
                 break
             probabilities, idxs, error_probs = self.predict(sequences)
 
-            pred_batch = self.postprocess_batch(orig_batch, probabilities,
+            pred_batch, edits_batch = self.postprocess_batch(orig_batch, probabilities,
                                                 idxs, error_probs)
+            # print(edits_batch)
+            corr_labels.extend(edits_batch)
             if self.log:
                 print(f"Iteration {n_iter + 1}. Predicted {round(100*len(pred_ids)/batch_size, 1)}% of sentences.")
 
@@ -295,4 +334,4 @@ class GecBERTModel(object):
             if not pred_ids:
                 break
 
-        return final_batch, total_updates
+        return final_batch, corr_labels, total_updates
